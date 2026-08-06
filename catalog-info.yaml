@@ -1,0 +1,38 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+
+metadata:
+  name: bb
+  description: Liquibase PostgreSQL migration service
+
+  annotations:
+    github.com/project-slug: devops-champ/bb
+    backstage.io/techdocs-ref: dir:.
+    roadie-backstage-pull-requests/default-filter: "is:open is:pr"
+    platform.io/argocd-dev: bb-dev
+    platform.io/argocd-qa: bb-qa
+    platform.io/argocd-prod: bb-prod
+    grafana/log-namespace: bb-dev
+
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/platform-team
+
+  platform:
+    AppId: ORDER-1223435
+    ApprovedJiraId: JIRA-123
+    BusinessUnit: Finance
+    SupportTeam: DEVOPS
+    CloudBudgetTicket: CR-123
+
+  infrastructure:
+    environments:
+      - name: dev
+        projectId: devops-champ
+
+      - name: qa
+        projectId: devops-champ
+
+      - name: prod
+        projectId: devops-champ
