@@ -1,127 +1,257 @@
-# Placeholder
-# Due to response-size limits, the complete enterprise workflow should be
-# authored as a standalone file. This template shows the intended stage layout.
-
-name: Liquibase PostgreSQL Review
+name: Deploy
 
 on:
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  IMAGE_NAME: liquibase/liquibase
 
 jobs:
+  ####################################################
+  # Stage 1: version
+  # Read current version and calculate next version
+  ####################################################
   version:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
 
-  build:
+    outputs:
+      current_version: ${{ steps.version.outputs.current_version }}
+      next_version: ${{ steps.next.outputs.next_version }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8
+
+      ####################################################
+      # Read current version
+      ####################################################
+
+      - name: Read current version
+        id: version
+        run: |
+          VERSION=$(mvn help:evaluate \
+            -Dexpression=project.version \
+            -q \
+            -DforceStdout)
+
+          VERSION=${VERSION/-SNAPSHOT/}
+
+          echo "CURRENT_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "current_version=$VERSION" >> $GITHUB_OUTPUT
+
+      ####################################################
+      # Increment patch version
+      ####################################################
+
+      - name: Calculate next version
+        id: next
+        run: |
+
+          IFS='.' read MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+          PATCH=$((PATCH+1))
+
+          NEXT_VERSION=$MAJOR.$MINOR.$PATCH
+
+          echo "NEXT_VERSION=$NEXT_VERSION" >> $GITHUB_ENV
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+
+  ####################################################
+  # Stage 2: update-version
+  # Update pom.xml to the next version
+  ####################################################
+  update-version:
     needs: version
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v5
 
-  prepare-context:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-  docker-build:
-    needs: prepare-context
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8
 
-  docker-save:
-    needs: docker-build
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo save image
+      ####################################################
+      # Update pom.xml
+      ####################################################
 
-  liquibase-validate:
-    needs: docker-save
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo validate
+      - name: Update pom version
+        run: |
 
-  liquibase-update:
-    needs: liquibase-validate
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo update
+          mvn versions:set \
+            -DnewVersion=${{ needs.version.outputs.next_version }}
 
-  tag-baseline:
-    needs: liquibase-update
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo tag
+          mvn versions:commit
 
-  compare-main:
-    needs: tag-baseline
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo compare# Placeholder
-# Due to response-size limits, the complete enterprise workflow should be
-# authored as a standalone file. This template shows the intended stage layout.
+      - name: Upload updated pom
+        uses: actions/upload-artifact@v4
+        with:
+          name: updated-pom
+          path: pom.xml
 
-name: Liquibase PostgreSQL Review
-
-on:
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
-
-jobs:
-  version:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
+  ####################################################
+  # Stage 3: build
+  # Build the artifact with the updated pom
+  ####################################################
   build:
-    needs: version
+    needs: [version, update-version]
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
 
-  prepare-context:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
+    env:
+      NEXT_VERSION: ${{ needs.version.outputs.next_version }}
 
-  docker-build:
-    needs: prepare-context
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
 
-  docker-save:
-    needs: docker-build
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo save image
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-  liquibase-validate:
-    needs: docker-save
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo validate
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8
 
-  liquibase-update:
-    needs: liquibase-validate
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo update
+      - name: Download updated pom
+        uses: actions/download-artifact@v4
+        with:
+          name: updated-pom
 
-  tag-baseline:
-    needs: liquibase-update
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo tag
+      ####################################################
+      # Build
+      ####################################################
 
-  compare-main:
-    needs: tag-baseline
+      - name: Maven Package
+        run: |
+          mvn clean package -B
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: target
+
+  ####################################################
+  # Stage 4: docker
+  # Login, build and push the Docker image
+  ####################################################
+  docker:
+    needs: [version, build]
     runs-on: ubuntu-latest
+
+    env:
+      NEXT_VERSION: ${{ needs.version.outputs.next_version }}
+
     steps:
-      - run: echo compare
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      ####################################################
+      # Docker Login
+      ####################################################
+
+      - name: Login DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      ####################################################
+      # Docker Build
+      ####################################################
+
+      - name: Build Docker Image
+        run: |
+
+          docker build \
+            -t ${IMAGE_NAME}:${NEXT_VERSION} .
+
+      ####################################################
+      # Push Image
+      ####################################################
+
+      - name: Push Docker Image
+        run: |
+
+          docker push ${IMAGE_NAME}:${NEXT_VERSION}
+
+  ####################################################
+  # Stage 5: release
+  # Commit version bump, push commit and create tag
+  ####################################################
+  release:
+    needs: [version, docker]
+    runs-on: ubuntu-latest
+
+    env:
+      NEXT_VERSION: ${{ needs.version.outputs.next_version }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download updated pom
+        uses: actions/download-artifact@v4
+        with:
+          name: updated-pom
+
+      ####################################################
+      # Commit version bump
+      ####################################################
+
+      - name: Commit version
+        run: |
+
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+
+          git add pom.xml
+
+          git commit -m "Release ${NEXT_VERSION}" || echo "No changes"
+
+      ####################################################
+      # Push commit
+      ####################################################
+
+      - name: Push commit
+        run: |
+
+          git push origin main
+
+      ####################################################
+      # Create tag
+      ####################################################
+
+      - name: Create Tag
+        run: |
+
+          git tag v${NEXT_VERSION}
+
+          git push origin v${NEXT_VERSION}
