@@ -4,32 +4,25 @@ on:
   pull_request:
     branches:
       - main
-
   workflow_dispatch:
-
 
 env:
   APPLICATION: liquibase-postgresql
-  ARTIFACT_VERSION: 1.0.0-SNAPSHOT
-
 
 jobs:
-
   review:
-
+    name: Liquibase Review Pipeline
     runs-on: ubuntu-latest
+
     services:
       postgres:
         image: postgres:16
-
         env:
           POSTGRES_DB: backstage
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-
         ports:
           - 5432:5432
-
         options: >-
           --health-cmd="pg_isready -U postgres -d backstage"
           --health-interval=10s
@@ -38,102 +31,97 @@ jobs:
 
     steps:
 
-      ##################################
-      # Checkout
-      ##################################
+      ##########################################################################
+      # Stage 1 - Checkout
+      ##########################################################################
 
-      - name: Checkout source
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
+      ##########################################################################
+      # Stage 2 - Build
+      ##########################################################################
 
-      ##################################
-      # Java + Maven
-      ##################################
-
-      - name: Setup Java 8
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '8'
+          java-version: "8"
           cache: maven
 
-
-      - name: Build artifact
+      - name: Build Maven Project
         run: |
           mvn clean package -B
 
-          echo "ARTIFACT_VERSION=$(mvn help:evaluate \
-          -Dexpression=project.version \
-          -q \
-          -DforceStdout)" >> $GITHUB_ENV
+      - name: Get Project Version
+        run: |
+          VERSION=$(mvn help:evaluate \
+            -Dexpression=project.version \
+            -q \
+            -DforceStdout)
 
-      - name: Inspect artifact
+          echo "ARTIFACT_VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Inspect Build
         run: |
           ls -R target
 
-      ##################################
-      # Prepare Docker context
-      ##################################
+      ##########################################################################
+      # Stage 3 - Prepare Docker Context
+      ##########################################################################
 
-      - name: Extract Liquibase artifact
+      - name: Extract Liquibase Package
         run: |
-          echo "Extracting Liquibase artifact"
-
-          tar -xzvf target/liquibase-postgresql-${ARTIFACT_VERSION}-liquibase.tar.gz
-
-          echo "Checking extracted files"
-
-          find liquibase-postgresql-${ARTIFACT_VERSION} -type f
-
-      - name: Prepare Docker context
-        run: |
-          echo "Extracting Liquibase artifact"
-
-          rm -rf docker-context
           mkdir docker-context
 
-          tar -xzf target/liquibase-postgresql-${ARTIFACT_VERSION}-liquibase.tar.gz -C docker-context
+          tar -xzf target/liquibase-postgresql-${ARTIFACT_VERSION}-liquibase.tar.gz \
+            -C docker-context
+
+      - name: Prepare Docker Files
+        run: |
 
           cp -r docker-context/liquibase-postgresql-${ARTIFACT_VERSION}/changelog .
           cp docker-context/liquibase-postgresql-${ARTIFACT_VERSION}/liquibase.properties .
           cp docker-context/liquibase-postgresql-${ARTIFACT_VERSION}/docker/entrypoint.sh .
 
-          echo "Checking extracted files"
+      - name: Verify Docker Context
+        run: |
+          find .
           ls -R changelog
 
-      - name: Verify Docker context
-        run: |
-          echo "Current directory:"
-          pwd
+      ##########################################################################
+      # Stage 4 - Build Docker Image
+      ##########################################################################
 
-          echo "Files:"
-          find . -maxdepth 3 -type f | sort
-
-          echo "Changelog directory:"
-          ls -lah changelog
-      ##################################
-      # Docker build
-      ##################################
-
-      - name: Build Liquibase image
+      - name: Build Docker Image
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: false
           load: true
+          push: false
           no-cache: true
-          tags: |
-            liquibase-postgres-review:${{ github.run_number }}
+          tags: liquibase-review:${{ github.run_number }}
 
-      - name: Debug docker image
+      - name: Verify Docker Image
         run: |
-          docker run --rm --entrypoint sh liquibase-postgres-review:${{ github.run_number }} -c "ls -R /liquibase"
+          docker images
+
+      - name: Inspect Image
+        run: |
+          docker run --rm \
+            --entrypoint sh \
+            liquibase-review:${{ github.run_number }} \
+            -c "ls -R /liquibase"
+
+      ##########################################################################
+      # Stage 5 - PostgreSQL
+      ##########################################################################
 
       - name: Wait for PostgreSQL
         run: |
           until pg_isready -h localhost -p 5432 -U postgres
           do
-            echo "Waiting for PostgreSQL..."
+            echo "Waiting..."
             sleep 2
           done
 
@@ -147,52 +135,91 @@ jobs:
             -d backstage \
             -c "SELECT version();"
 
-      - name: Apply master (base) changelog
-        run: |
-          echo "Applying master changelog"
+      ##########################################################################
+      # Stage 6 - Liquibase Validation
+      ##########################################################################
 
-          docker run --rm --network host \
-            liquibase-postgres-review:${{ github.run_number }} \
-            --changeLogFile=changelog/db.changelog-master.xml \
-            --url="jdbc:postgresql://localhost:5432/backstage" \
-            --username="postgres" \
-            --password="postgres" \
-            update
-
-      - name: Checkout main branch separately
-        run: |
-          git fetch origin main
-          git worktree add /tmp/main origin/main
-
-          ls -la /tmp/main
-
-
-      - name: Validate main changelog
+      - name: Validate Changelog
         run: |
           docker run --rm --network host \
-            liquibase-postgres-review:${{ github.run_number }} \
+            liquibase-review:${{ github.run_number }} \
             --changeLogFile=changelog/db.changelog-master.xml \
             --url=jdbc:postgresql://localhost:5432/backstage \
             --username=postgres \
             --password=postgres \
             validate
 
-      - name: Apply base schema
+      ##########################################################################
+      # Stage 7 - Apply Base Schema
+      ##########################################################################
+
+      - name: Apply Changelog
         run: |
           docker run --rm --network host \
-            liquibase-postgres-review:${{ github.run_number }} \
+            liquibase-review:${{ github.run_number }} \
             --changeLogFile=changelog/db.changelog-master.xml \
             --url=jdbc:postgresql://localhost:5432/backstage \
             --username=postgres \
             --password=postgres \
             update
 
-      - name: Tag baseline
+      ##########################################################################
+      # Stage 8 - Tag Baseline
+      ##########################################################################
+
+      - name: Tag Baseline
         run: |
           docker run --rm --network host \
-            liquibase-postgres-review:${{ github.run_number }} \
+            liquibase-review:${{ github.run_number }} \
             --changeLogFile=changelog/db.changelog-master.xml \
             --url=jdbc:postgresql://localhost:5432/backstage \
             --username=postgres \
             --password=postgres \
             tag review-baseline
+
+      ##########################################################################
+      # Stage 9 - Checkout Main Branch
+      ##########################################################################
+
+      - name: Checkout Main Worktree
+        run: |
+          git fetch origin main
+          git worktree add /tmp/main origin/main
+
+          ls -la /tmp/main
+
+      ##########################################################################
+      # Stage 10 - Apply Main Branch Changelog
+      ##########################################################################
+
+      - name: Validate Main
+        run: |
+          docker run --rm --network host \
+            -v /tmp/main:/workspace \
+            liquibase-review:${{ github.run_number }} \
+            --changeLogFile=/workspace/changelog/db.changelog-master.xml \
+            --url=jdbc:postgresql://localhost:5432/backstage \
+            --username=postgres \
+            --password=postgres \
+            validate
+
+      - name: Update Main
+        run: |
+          docker run --rm --network host \
+            -v /tmp/main:/workspace \
+            liquibase-review:${{ github.run_number }} \
+            --changeLogFile=/workspace/changelog/db.changelog-master.xml \
+            --url=jdbc:postgresql://localhost:5432/backstage \
+            --username=postgres \
+            --password=postgres \
+            update
+
+      ##########################################################################
+      # Stage 11 - Success
+      ##########################################################################
+
+      - name: Pipeline Complete
+        run: |
+          echo "======================================="
+          echo "Liquibase Review Completed Successfully"
+          echo "======================================="
