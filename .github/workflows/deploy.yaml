@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  IMAGE_NAME: liquibase/liquibase
+  IMAGE_NAME: backstage2026/liquibase
 
 jobs:
   ####################################################
